@@ -1,0 +1,113 @@
+# EVM PoC — GitHub Actions runner pack (Foundry). FORK/STANDALONE VARIANT.
+# Difference from run-evm-pocs.yml: adds a forge-std install step, for
+# repos that do not vendor lib/forge-std (e.g. Hardhat-only targets, or
+# a standalone PoC repo). Commit as .github/workflows/run-evm-pocs.yml.
+
+name: run-evm-pocs
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to test (commit SHA or branch of this repo). Pin the analysed ref."
+        required: false
+        type: string
+        default: ""
+      match_pattern:
+        description: "Optional forge --match-test regex (empty = all tests in poc-pack-evm/)"
+        required: false
+        type: string
+        default: ""
+      test_dir:
+        description: "Directory (relative to repo root) the PoC tests are copied into"
+        required: false
+        type: string
+        default: "test"
+      fork_rpc_url:
+        description: "OPTIONAL RPC URL for local-fork tests. Leave empty for pure local tests."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run-evm-pocs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evm-poc:
+    name: evm-poc (foundry)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repo (dispatched branch, for poc-pack-evm/)
+        uses: actions/checkout@v4
+
+      - name: Materialise poc-pack-evm/ and remember its path
+        run: |
+          mkdir -p poc-logs
+          ls -la poc-pack-evm | tee poc-logs/pack.txt
+          cp -r poc-pack-evm "$RUNNER_TEMP/poc-pack-evm"
+
+      - name: Check out target ref
+        if: ${{ inputs.ref != '' }}
+        run: |
+          git fetch --depth 1 origin "${{ inputs.ref }}" || git fetch origin
+          git checkout FETCH_HEAD || git checkout "${{ inputs.ref }}"
+          git rev-parse HEAD | tee poc-logs/ref.txt
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install forge-std (if not vendored)
+        run: |
+          if [ ! -d lib/forge-std ]; then
+            forge install foundry-rs/forge-std --no-commit || forge install foundry-rs/forge-std
+          fi
+          ls lib/forge-std/src/Test.sol
+
+      - name: Install repo dependencies (if any)
+        run: |
+          git submodule update --init --recursive || true
+          if [ -f package.json ]; then
+            (npm ci || npm install) || true
+          fi
+          forge --version | tee poc-logs/versions.txt
+          solc --version 2>/dev/null | tee -a poc-logs/versions.txt || true
+
+      - name: Copy PoC tests into place
+        run: |
+          mkdir -p "${{ inputs.test_dir }}"
+          cp "$RUNNER_TEMP"/poc-pack-evm/*.t.sol "${{ inputs.test_dir }}/"
+          ls -la "${{ inputs.test_dir }}" | tee -a poc-logs/pack.txt
+
+      - name: Build
+        run: |
+          set -o pipefail
+          forge build 2>&1 | tee poc-logs/build.log
+
+      - name: Run PoC tests
+        run: |
+          set -o pipefail
+          MATCH_ARGS=()
+          if [ -n "${{ inputs.match_pattern }}" ]; then
+            MATCH_ARGS+=(--match-test "${{ inputs.match_pattern }}")
+          fi
+          FORK_ARGS=()
+          if [ -n "${{ inputs.fork_rpc_url }}" ]; then
+            FORK_ARGS+=(--fork-url "${{ inputs.fork_rpc_url }}")
+          fi
+          forge test "${MATCH_ARGS[@]}" "${FORK_ARGS[@]}" -vvv 2>&1 | tee poc-logs/test.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evm-poc-logs
+          path: poc-logs/
+          retention-days: 14
+          if-no-files-found: warn
