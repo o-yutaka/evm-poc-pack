@@ -67,9 +67,11 @@ for i in $(seq 1 60); do
 import json,sys
 try:
     d=json.load(open(sys.argv[1]))
-    s=d.get("status",{})
-    lvl=(s.get("overall",{}) or {}).get("level",{}) or {}
-    ok = lvl.get("id")=="available" or s.get("overall",{}).get("state")=="green"
+    # 9.5.5 /api/status shape: status.overall.level is the STRING "available"
+    # (run #1's check looked for overall.id / overall.state, which do not
+    # exist, so it reported ready=0 against a fully available Kibana).
+    ov=(d.get("status",{}) or {}).get("overall",{}) or {}
+    ok = ov.get("level")=="available" or ov.get("state")=="green"
     sys.exit(0 if ok else 1)
 except Exception:
     sys.exit(1)
@@ -78,6 +80,11 @@ PY
   sleep 10
 done
 note "Kibana ready=$kready"
+if [ "$kready" = "0" ]; then
+  note "VERDICT: SETUP-FAILED - Kibana /api/status never reported available (see 00-kb-status.json); tests not run"
+  note "Evidence dir: $EV"
+  exit 1
+fi
 
 echo "== trial licence =="
 code=$(req "$EV/01-licence.json" POST "$ES/_license/start_trial?acknowledge=true" -u "elastic:$ELASTIC_PASSWORD")
@@ -98,13 +105,51 @@ code=$(req "$EV/02-user.json" PUT "$ES/_security/user/$AB_USER" -u "elastic:$ELA
 note "create low-priv user http=$code"
 
 echo "== enabling agentBuilder:experimentalFeatures in the test space =="
-req "$EV/03-settings-space.json" POST "$KB/s/$SPACE/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
+# Run #1 lesson: POST /api/kibana/settings returns 400 in Kibana 9.5.5
+# ("exists but is not available with the current configuration" - the 9.x
+# internal-API restriction), so the flag NEVER landed and the install
+# route stayed unregistered (404). Record the codes this time, then fall
+# back to writing the flag straight into the config saved object (the
+# store behind Advanced Settings) and VERIFY it before running any test.
+code_sd=$(req "$EV/03-settings-default.json" POST "$KB/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
   -H "kbn-xsrf: true" -H "Content-Type: application/json" \
-  -d '{"changes":{"agentBuilder:experimentalFeatures":true}}' >/dev/null
-req "$EV/03-settings-default.json" POST "$KB/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
+  -d '{"changes":{"agentBuilder:experimentalFeatures":true}}')
+code_ss=$(req "$EV/03-settings-space.json" POST "$KB/s/$SPACE/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
   -H "kbn-xsrf: true" -H "Content-Type: application/json" \
-  -d '{"changes":{"agentBuilder:experimentalFeatures":true}}' >/dev/null
-note "settings written (see 03-settings-*.json)"
+  -d '{"changes":{"agentBuilder:experimentalFeatures":true}}')
+note "settings POST default http=$code_sd space http=$code_ss (see 03-settings-*.json)"
+KBVER=$(jsonget "$EV/00-kb-status.json" "d['version']['number']")
+set_flag_so() { # $1=base-url $2=outfile-prefix -> echoes final http code
+  local base="$1" pre="$2" code
+  code=$(req "$pre-get.json" GET "$base/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" -H "kbn-xsrf: true")
+  if [ "$code" = "200" ]; then
+    code=$(req "$pre-put.json" PUT "$base/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" \
+      -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+      -d '{"attributes":{"agentBuilder:experimentalFeatures":true}}')
+  else
+    code=$(req "$pre-post.json" POST "$base/api/saved_objects/config" -u "elastic:$ELASTIC_PASSWORD" \
+      -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+      -d "{\"id\":\"$KBVER\",\"attributes\":{\"agentBuilder:experimentalFeatures\":true}}")
+    if [ "$code" = "409" ]; then
+      code=$(req "$pre-put.json" PUT "$base/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" \
+        -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+        -d '{"attributes":{"agentBuilder:experimentalFeatures":true}}')
+    fi
+  fi
+  echo "$code"
+}
+code_so_d=$(set_flag_so "$KB" "$EV/03b-so-default")
+code_so_s=$(set_flag_so "$KB/s/$SPACE" "$EV/03b-so-space")
+note "config-SO write default http=$code_so_d space http=$code_so_s (see 03b-so-*.json)"
+code_v=$(req "$EV/03c-flag-verify.json" GET "$KB/s/$SPACE/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" -H "kbn-xsrf: true")
+if grep -q '"agentBuilder:experimentalFeatures":true' "$EV/03c-flag-verify.json" 2>/dev/null; then
+  note "flag verified in space config saved object (GET http=$code_v)"
+else
+  note "flag NOT verified in space config saved object (GET http=$code_v; inspect 03c-flag-verify.json)"
+  note "VERDICT: SETUP-FAILED - agentBuilder:experimentalFeatures could not be applied/verified; install tests would run against an unflagged stack"
+  note "Evidence dir: $EV"
+  exit 1
+fi
 
 mk_connector() { # $1=name $2=url $3=outfile -> echoes connector id or empty
   local code id
@@ -153,20 +198,33 @@ install() { # $1=url $2=outfile -> echoes http code
     -H "kbn-xsrf: true" -H "Content-Type: application/json" -H "elastic-api-version: 2023-10-31" \
     -d "{\"url\":\"$1\"}"
 }
-list_plugins() { # $1=outfile
+list_plugins() { # $1=outfile -> echoes http code
   req "$1" GET "$KB/s/$SPACE/api/agent_builder/plugins" -u "$AB_USER:$AB_PASSWORD" \
-    -H "elastic-api-version: 2023-10-31" >/dev/null
+    -H "elastic-api-version: 2023-10-31"
 }
+
+echo "== DISCRIMINATOR: superuser plugin routes in the DEFAULT space (route-existence check) =="
+code_dl=$(req "$EV/03d-disc-list.json" GET "$KB/api/agent_builder/plugins" -u "elastic:$ELASTIC_PASSWORD" \
+  -H "elastic-api-version: 2023-10-31")
+note "discriminator superuser list (default space) http=$code_dl"
+code_di=$(req "$EV/03d-disc-install.json" POST "$KB/api/agent_builder/plugins/install" -u "elastic:$ELASTIC_PASSWORD" \
+  -H "kbn-xsrf: true" -H "Content-Type: application/json" -H "elastic-api-version: 2023-10-31" \
+  -d '{"url":"http://canary:8080/z.zip"}')
+note "discriminator superuser install (default space, third canary plugin) http=$code_di (200/meaningful error = route registered; 404 = route not registered)"
 
 echo "== TEST 1: low-priv plugin install from UNLISTED canary URL =="
 code1=$(install "http://canary:8080/x.zip" "$EV/09-test1-install.json")
 note "test1 install http=$code1"
-list_plugins "$EV/10-test1-list.json"
+code1l=$(list_plugins "$EV/10-test1-list.json")
+note "test1 list http=$code1l"
 
 echo "== TEST 2: low-priv plugin install via ALLOWED redirector -302-> canary =="
 code2=$(install "http://redirector:8080/jump.zip" "$EV/11-test2-install.json")
 note "test2 install http=$code2"
-list_plugins "$EV/12-test2-list.json"
+code2l=$(list_plugins "$EV/12-test2-list.json")
+note "test2 list http=$code2l"
+note "test1 install body: $(head -c 400 "$EV/09-test1-install.json")"
+note "test2 install body: $(head -c 400 "$EV/11-test2-install.json")"
 
 echo "== collecting service logs =="
 docker compose logs --no-color canary     > "$EV/13-canary.log" 2>&1
