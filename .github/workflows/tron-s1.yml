@@ -32,11 +32,11 @@ jobs:
           ref: b33eed89a6a424c498d4fb1b03ca2c86eddf4840
           path: java-tron
 
-      - name: Set up JDK 17
+      - name: Set up JDK 8
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '8'
 
       - name: Install S-1 test into the java-tron tree
         run: |
@@ -49,6 +49,7 @@ jobs:
         continue-on-error: true
         working-directory: java-tron
         run: |
+          set -o pipefail
           ./gradlew :framework:test \
             --tests "org.tron.core.db.ManagerSameBlockRevocationTest" \
             --stacktrace 2>&1 | tee ../tron-s1-gradle.log
