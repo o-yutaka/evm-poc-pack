@@ -175,7 +175,17 @@ contract RhinoCommitmentPoC is Test {
         if (address(BRIDGE).code.length == 0) {
             vm.createSelectFork(FORK_RPC);
         }
-        (alice, alicePk) = makeAddrAndKey("alice");
+        // Fixed test key, NOT makeAddrAndKey: deterministic label-derived
+        // addresses (and other well-known test keys) carry EIP-7702
+        // delegation designators on Optimism mainnet, and FiatTokenV2_2's
+        // SignatureChecker routes any signer with code size > 0 to the
+        // ERC-1271 path, so EOA permits from such addresses always fail
+        // with "EIP2612: invalid signature" (diagnosed 2026-10-30 against
+        // the deployed USDC implementation + eth_getCode). This key's
+        // address (0xaf0bca1782c20727ad30b338ca4bf336e6837f0d) was verified
+        // code-free on Optimism before use.
+        alicePk = 0x9d3f8a1c47b2e60593f4a7d81c2b5e09f6a3d4c7b8e1f205a6c9d3b4e7f80251;
+        alice = vm.addr(alicePk);
         bob = makeAddr("bob");
         victim = makeAddr("victim");
         carol = makeAddr("carol");
