@@ -1,0 +1,100 @@
+name: tron-s1-repro
+
+# S-1: same-block permission revocation does not invalidate a later
+# same-block transaction on java-tron's block-validation path.
+# Runs ManagerSameBlockRevocationTest (this repo, tron-s1/) against
+# tronprotocol/java-tron pinned at b33eed89a6a424c498d4fb1b03ca2c86eddf4840.
+# Expected at that HEAD: all 3 tests PASS (the bug-case test passes only
+# because the vulnerable code accepts the revoked-key spend; the two
+# cross-block controls pass because they are rejected).
+
+on:
+  push:
+    paths:
+      - 'tron-s1/**'
+      - '.github/workflows/tron-s1.yml'
+  workflow_dispatch:
+
+jobs:
+  tron-s1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout PoC pack
+        uses: actions/checkout@v4
+        with:
+          path: poc-pack
+
+      - name: Checkout java-tron (pinned vulnerable HEAD)
+        uses: actions/checkout@v4
+        with:
+          repository: tronprotocol/java-tron
+          ref: b33eed89a6a424c498d4fb1b03ca2c86eddf4840
+          path: java-tron
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install S-1 test into the java-tron tree
+        run: |
+          cp poc-pack/tron-s1/ManagerSameBlockRevocationTest.java \
+             java-tron/framework/src/test/java/org/tron/core/db/
+          ls -l java-tron/framework/src/test/java/org/tron/core/db/ManagerSameBlockRevocationTest.java
+
+      - name: Run S-1 tests (Gradle)
+        id: gradle
+        continue-on-error: true
+        working-directory: java-tron
+        run: |
+          ./gradlew :framework:test \
+            --tests "org.tron.core.db.ManagerSameBlockRevocationTest" \
+            --stacktrace 2>&1 | tee ../tron-s1-gradle.log
+
+      - name: Publish test results to step summary
+        if: always()
+        run: |
+          {
+            echo '## TRON S-1 reproduction results'
+            echo ''
+            echo "Gradle step outcome: **${{ steps.gradle.outcome }}**"
+            echo ''
+            for f in java-tron/framework/build/test-results/test/TEST-org.tron.core.db.ManagerSameBlockRevocationTest.xml; do
+              if [ -f "$f" ]; then
+                echo '### JUnit XML (verbatim)'
+                echo '```xml'
+                cat "$f"
+                echo '```'
+              else
+                echo '### JUnit XML not found'
+                ls -R java-tron/framework/build/test-results/ || true
+              fi
+            done
+            echo ''
+            echo '### Marker lines from Gradle log'
+            echo '```'
+            grep -a "S-1 CONFIRMED\|CONTROL A OK\|CONTROL B OK" tron-s1-gradle.log || echo '(no marker lines in console log; see JUnit XML system-out above)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tron-s1-test-reports
+          path: |
+            java-tron/framework/build/reports/tests/
+            java-tron/framework/build/test-results/
+            tron-s1-gradle.log
+          if-no-files-found: warn
+
+      - name: Gate on Gradle outcome
+        if: always()
+        run: |
+          if [ "${{ steps.gradle.outcome }}" != "success" ]; then
+            echo "Gradle test run did not succeed (outcome: ${{ steps.gradle.outcome }})"
+            exit 1
+          fi
+          echo "All S-1 tests passed."
