@@ -2,6 +2,7 @@ package org.tron.core.db;
 
 import com.google.protobuf.ByteString;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -120,9 +121,18 @@ public class ManagerSameBlockRevocationTest extends BaseMethodTest {
     installWitness();
   }
 
-  /** Installs the fixed-key witness as the only active witness (ManagerTest pattern). */
+  /**
+   * Installs the fixed-key witness as the only active witness (ManagerTest /
+   * ManagerForTest pattern). The active list lives in WitnessScheduleStore and
+   * ChainBaseManager.getWitnesses() returns a freshly built copy on every call,
+   * so clear() on that copy never touches the store -- the genesis witnesses
+   * stay active and DposSlot schedules one of them instead of this witness.
+   * The store must be reset explicitly, as ManagerTest does, before
+   * addWitness() appends this witness to the (now empty) stored list. With a
+   * single active witness, getScheduledWitness() returns it for every slot.
+   */
   private void installWitness() {
-    chainBaseManager.getWitnesses().clear();
+    chainBaseManager.getWitnessScheduleStore().saveActiveWitnesses(new ArrayList<>());
     ByteString address = ByteString.copyFrom(WITNESS_ADDRESS);
     WitnessCapsule witnessCapsule = new WitnessCapsule(address);
     chainBaseManager.getWitnessStore().put(WITNESS_ADDRESS, witnessCapsule);
