@@ -2,4 +2,4 @@
 src = "src"
 test = "test"
 out = "out"
-solc = "auto"
+solc = "0.8.26"
