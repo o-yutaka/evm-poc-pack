@@ -1,0 +1,90 @@
+# Elastic Agent Builder allowedHosts-bypass repro stack.
+# Pinned GA: 9.5.5 (GA 2026-10-06; latest 9.5 patch per elastic.co / endoflife.date).
+#  - >= 9.3.3, the fixed line for the 2026 connector/Workflows SSRF advisories
+#    (CVE-2026-49093 / CVE-2026-33458), so the guarded paths tested as CONTROLs
+#    are the FIXED implementations.
+#  - Agent Builder plugin install route exists in GA since 9.4.0
+#    (source: routes/plugins.ts availability annotation `since: '9.4.0'`).
+# Lab simplification (does not affect the mechanism under test): ES/Kibana run
+# over plain HTTP inside the compose network with security (auth) ENABLED.
+# TLS is off only to keep the kit single-file; allowedHosts enforcement and
+# the Agent Builder installer do not depend on TLS.
+name: elastic-ab-repro
+
+services:
+  es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    mem_limit: 2.5g
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:$$ELASTIC_PASSWORD http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    networks:
+      - repro
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.5
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - ELASTICSEARCH_HOSTS=http://es:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_SYSTEM_PASSWORD}
+      # The operator-configured security control under test.
+      #  - "example.com": an arbitrary internet host entry (operator intent:
+      #    only this public host may be fetched by connectors).
+      #  - "redirector": an ALLOWED host we control, needed so the redirect
+      #    test has an allowed origin (see README, correction 1).
+      # "canary" is deliberately NOT listed: it is the internal target.
+      - XPACK_ACTIONS_ALLOWEDHOSTS=["example.com","redirector"]
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ESO_ENCRYPTION_KEY}
+    mem_limit: 2g
+    ports:
+      - "5601:5601"
+    depends_on:
+      es:
+        condition: service_healthy
+    networks:
+      - repro
+
+  # Internal-only target. Serves the plugin zips and a /hook endpoint.
+  # No published ports: reachable only from inside the compose network,
+  # like an internal service an SSRF would aim at.
+  canary:
+    image: python:3.12-alpine
+    environment:
+      - CANARY_MODE=serve
+    command: ["python3", "/app/server.py"]
+    volumes:
+      - ./canary/server.py:/app/server.py:ro
+      - ./canary/data:/data:ro
+    networks:
+      - repro
+
+  # Allowed-host origin that 302-redirects every path to the canary.
+  redirector:
+    image: python:3.12-alpine
+    environment:
+      - CANARY_MODE=redirect
+    command: ["python3", "/app/server.py"]
+    volumes:
+      - ./canary/server.py:/app/server.py:ro
+    networks:
+      - repro
+
+networks:
+  repro:
+    driver: bridge
