@@ -19,6 +19,9 @@ Shape derived from the Kibana source (local clone, HEAD 9.7.0-dev):
 Outputs:
   canary/data/x.zip  (plugin "ssrf-canary-a") — fetched directly in TEST 1
   canary/data/y.zip  (plugin "ssrf-canary-b") — fetched via redirect in TEST 2
+  canary/data/z.zip  (plugin "ssrf-canary-c") — discriminator-only install
+    in the DEFAULT space (never used by TEST 1/2, so it cannot collide
+    with either test's duplicate-name rejection).
 """
 import json
 import os
@@ -61,3 +64,4 @@ def build(zip_name: str, plugin_name: str, skill_dir: str, marker: str) -> str:
 if __name__ == "__main__":
     build("x.zip", "ssrf-canary-a", "canary-a", "CANARY_A_7f3d9")
     build("y.zip", "ssrf-canary-b", "canary-b", "CANARY_B_51e2c")
+    build("z.zip", "ssrf-canary-c", "canary-c", "CANARY_C_9e41a")
