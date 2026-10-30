@@ -105,17 +105,24 @@ code=$(req "$EV/02-user.json" PUT "$ES/_security/user/$AB_USER" -u "elastic:$ELA
 note "create low-priv user http=$code"
 
 echo "== enabling agentBuilder:experimentalFeatures in the test space =="
-# Run #1 lesson: POST /api/kibana/settings returns 400 in Kibana 9.5.5
-# ("exists but is not available with the current configuration" - the 9.x
-# internal-API restriction), so the flag NEVER landed and the install
-# route stayed unregistered (404). Record the codes this time, then fall
-# back to writing the flag straight into the config saved object (the
-# store behind Advanced Settings) and VERIFY it before running any test.
+# Run #1/#2 lesson, corrected by the 9.5.5 source (elastic-run3-diagnosis.md):
+# POST /api/kibana/settings EXISTS and writes exactly the right store (the
+# per-space config saved object, via the space uiSettings client) - but in
+# 9.5.5 it is a core INTERNAL route. Kibana's restrictInternalApis check
+# (default ON) rejects non-internal callers with 400 "uri [...] exists but
+# is not available with the current configuration" - the 400 seen in both
+# spaces in runs #1/#2. A request counts as internal when it carries the
+# header "x-elastic-internal-origin: Kibana" (what Kibana's own browser
+# client sends). So: send that header. The raw config-SO write below stays
+# as a fallback, with run #2's bug fixed: at 9.5.5 the saved-objects create
+# body schema has NO "id" field (unknown keys are rejected -> the space
+# 400); the id goes in the PATH (POST /api/saved_objects/config/<id>).
+# Either way, VERIFY the flag in the space config object before any test.
 code_sd=$(req "$EV/03-settings-default.json" POST "$KB/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
-  -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+  -H "kbn-xsrf: true" -H "x-elastic-internal-origin: Kibana" -H "Content-Type: application/json" \
   -d '{"changes":{"agentBuilder:experimentalFeatures":true}}')
 code_ss=$(req "$EV/03-settings-space.json" POST "$KB/s/$SPACE/api/kibana/settings" -u "elastic:$ELASTIC_PASSWORD" \
-  -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+  -H "kbn-xsrf: true" -H "x-elastic-internal-origin: Kibana" -H "Content-Type: application/json" \
   -d '{"changes":{"agentBuilder:experimentalFeatures":true}}')
 note "settings POST default http=$code_sd space http=$code_ss (see 03-settings-*.json)"
 KBVER=$(jsonget "$EV/00-kb-status.json" "d['version']['number']")
@@ -127,9 +134,9 @@ set_flag_so() { # $1=base-url $2=outfile-prefix -> echoes final http code
       -H "kbn-xsrf: true" -H "Content-Type: application/json" \
       -d '{"attributes":{"agentBuilder:experimentalFeatures":true}}')
   else
-    code=$(req "$pre-post.json" POST "$base/api/saved_objects/config" -u "elastic:$ELASTIC_PASSWORD" \
+    code=$(req "$pre-post.json" POST "$base/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" \
       -H "kbn-xsrf: true" -H "Content-Type: application/json" \
-      -d "{\"id\":\"$KBVER\",\"attributes\":{\"agentBuilder:experimentalFeatures\":true}}")
+      -d '{"attributes":{"agentBuilder:experimentalFeatures":true}}')
     if [ "$code" = "409" ]; then
       code=$(req "$pre-put.json" PUT "$base/api/saved_objects/config/$KBVER" -u "elastic:$ELASTIC_PASSWORD" \
         -H "kbn-xsrf: true" -H "Content-Type: application/json" \
