@@ -2,7 +2,7 @@
 """Canary / redirector service for the Elastic Agent Builder repro.
 
 Modes (CANARY_MODE env):
-  serve    -> serves /x.zip and /y.zip from /data, /hook returns 200.
+  serve    -> serves /x.zip, /y.zip and /z.zip from /data, /hook returns 200.
               Represents an internal-only service on the compose network.
   redirect -> 302-redirects to the canary: /jump.zip -> canary /y.zip
               (TEST 2's distinct plugin), every other path -> same path
@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(302, b"", extra={"Location": target})
             return
         # serve mode
-        if self.path in ("/x.zip", "/y.zip"):
+        if self.path in ("/x.zip", "/y.zip", "/z.zip"):
             fpath = "/data" + self.path
             try:
                 with open(fpath, "rb") as fh:
